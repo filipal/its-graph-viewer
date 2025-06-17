@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import GraphCanvasComponent from './components/GraphCanvas';
 import Toolbar from './components/Toolbar';
 import Sidebar from './components/Sidebar';
@@ -10,49 +10,57 @@ const App: React.FC = () => {
   const { graphData, setGraphData } = useSession();
   const [selectedNode, setSelectedNode] = useState<NodeType | null>(null);
   const [viewMode, setViewMode] = useState<'landscape' | 'credentials' | 'dataservice' | 'firewalls'>('landscape');
-  const [rawJson, setRawJson] = useState<any>(null);
+  const [rawJson, setRawJson] = useState<any>(null); // Dodano za ponovno parsiranje
   const [inputJson, setInputJson] = useState<any>(null);
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
 
-    // Resetiramo stanje prije učitavanja novih datoteka
-    setRawJson(null);
-    setInputJson(null);
+    let outputJson: any = null;
+    let inputJsonData: any = null;
+    let loaded = 0;
 
     Array.from(files).forEach((file) => {
       const reader = new FileReader();
+
       reader.onload = (event) => {
         const content = event.target?.result;
         if (typeof content === 'string') {
           try {
             const parsed = JSON.parse(content);
+
             if (file.name.toLowerCase().includes('input')) {
+              inputJsonData = parsed;
               setInputJson(parsed);
             } else {
+              outputJson = parsed;
               setRawJson(parsed);
             }
           } catch (err) {
             console.error(`❌ Greška kod parsiranja datoteke ${file.name}:`, err);
+          } finally {
+            loaded++;
+            if (loaded === files.length && outputJson) {
+              const graph = parseJSONToGraph(outputJson, inputJsonData);
+              setGraphData(graph);
+            }
           }
         }
       };
+
       reader.readAsText(file);
     });
   };
 
-  // JEDINI EFEKT ZA PARSIRANJE
-  // Ovaj useEffect će se pokrenuti samo kada se rawJson, inputJson ili viewMode promijene.
-  useEffect(() => {
-    // Parsiramo samo ako imamo glavnu JSON datoteku
+  // Kad se promijeni viewMode, ponovno parsiraj isti JSON (ako postoji)
+  React.useEffect(() => {
     if (rawJson) {
-      console.log('*** POZIVAM PARSER (useEffect u App.tsx) ***');
       const graph = parseJSONToGraph(rawJson, inputJson);
       setGraphData(graph);
       setSelectedNode(null);
     }
-  }, [rawJson, inputJson, viewMode, setGraphData]); // Ovisnosti su ključne
+  }, [viewMode, rawJson, inputJson]);
 
   const handleExport = () => {
     const blob = new Blob([JSON.stringify(graphData, null, 2)], { type: 'application/json' });
@@ -67,10 +75,7 @@ const App: React.FC = () => {
     setGraphData({ nodes: [], edges: [] });
     setSelectedNode(null);
     setRawJson(null);
-    setInputJson(null);
   };
-
-  console.log('PROVJERA PRIJE RENDERIRANJA: Broj čvorova:', graphData?.nodes?.length ?? 0);
 
   return (
     <div style={{ display: 'flex', height: '100vh' }}>
@@ -85,9 +90,9 @@ const App: React.FC = () => {
         <Sidebar selectedNode={selectedNode} onUpdate={() => {}} />
       </div>
       <div style={{ flex: 1, padding: '10px', background: '#181818' }}>
-        {graphData && graphData.nodes.length > 0 ? (
+        {graphData.nodes.length > 0 ? (
           <GraphCanvasComponent
-            // Ključno: Nema `key` propa!
+            key={JSON.stringify(graphData)}
             data={graphData}
             onNodeClick={setSelectedNode}
           />

@@ -6,6 +6,13 @@ function getCustomerLabel(binaryLabel: string): string {
     case "Outlook": return "EmailClient";
     case "Firefox": return "Browser";
     case "Financial App Client": return "Finance";
+    case "Remote Administration Tools": return "Admin";
+    case "Visual Studio 2019": return "Dev:Windows";
+    case "SQL Server 2019": return "Database";
+    case "Internet Banking Server": return "Banking";
+    case "Exchange Server": return "EmailServer";
+    case "Windows Server 2016": return "Server:Windows";
+    case "Financial App Server": return "FinApp";
     default: return binaryLabel;
   }
 }
@@ -14,29 +21,24 @@ function getBinaryLabel(sw: any): string {
   let name = sw?.name?.trim() || '';
   const cpe = sw?.cpe_idn || '';
   const idn = sw?.idn || '';
-
   let source = name || cpe || idn;
 
-  // Ekstrahiraj ime nakon zadnjeg ':' ili '/'
   let extracted = source.split(/[:\/]/).pop() || source;
-  // Ukloni sve nakon # (GUID)
   extracted = extracted.split('#')[0];
-  // Zamijeni podvlake s razmakom i pretvori u mala slova
   let norm = extracted.replace(/_/g, ' ').toLowerCase();
 
-  // Dodaj SQL Server 2019
-  if (norm.includes('sql server 2019') || norm.includes('sql_server:2019') || norm.includes('sql server') && norm.includes('2019')) {
+  if (norm.includes('sql server 2019') || norm.includes('sql_server:2019') || (norm.includes('sql server') && norm.includes('2019')))
     return 'SQL Server 2019';
-  }
-
-  // Prepoznaj poznate servere
   if (norm.includes('internet banking')) return 'Internet Banking Server';
   if (norm.includes('exchange server')) return 'Exchange Server';
   if (norm.includes('windows server')) return 'Windows Server 2016';
   if (norm.includes('iis')) return 'IIS';
   if (norm.includes('.net')) return '.NET Framework';
+  if (norm.includes('active directory')) return 'Microsoft Active Directory';
+  if (cpe.includes('remote_administration_tools')) return 'Remote Administration Tools';
+  if (cpe.includes('visual_studio_2019')) return 'Visual Studio 2019';
+  if (cpe.includes('fin_app_server')) return 'Financial App Server';
 
-  // Ako nema imena, pokušaj s CPE
   if (cpe.includes('microsoft:office')) return 'Office';
   if (cpe.includes('microsoft:outlook')) return 'Outlook';
   if (cpe.includes('mozilla:firefox')) return 'Firefox';
@@ -45,12 +47,29 @@ function getBinaryLabel(sw: any): string {
   if (cpe.includes('exchange_server')) return 'Exchange Server';
   if (cpe.includes('windows_server_2016')) return 'Windows Server 2016';
   if (cpe.includes('sql_server:2019')) return 'SQL Server 2019';
+  if (cpe.includes('microsoft:active_directory')) return 'Microsoft Active Directory';
+  if (norm.includes('remote administration tools')) return 'Remote Administration Tools';
+  if (norm.includes('visual studio 2019')) return 'Visual Studio 2019';
+  if (norm.includes('fin_app_server')) return 'Financial App Server';
 
   return extracted || source;
 }
 
+// ✅ Nova pomoćna funkcija – je li softver OS bez korisničkih servisa
+function isUnwantedOperatingSystem(sw: any): boolean {
+  const cpe = sw?.cpe_idn || '';
+  const label = getBinaryLabel(sw).toLowerCase();
+
+  const isOS = cpe.startsWith('cpe:/o:');
+  const isKnownServer =
+    label.includes('server') || label.includes('exchange') || label.includes('banking');
+
+  const hasUserServices = sw?.provides_user_services?.length > 0;
+
+  return isOS && !hasUserServices && !isKnownServer;
+}
+
 function formatServerId(rawCompId: string): string {
-  // Pretvori None:0:0 → server.0.0, None:0:2#1 → server.0.2.1
   if (rawCompId.startsWith('None')) {
     return 'server.' + rawCompId
       .replace(/^None:/, '')
@@ -59,6 +78,21 @@ function formatServerId(rawCompId: string): string {
   }
   return rawCompId.replace(/:/g, '.').replace(/#/g, '.');
 }
+
+function getGroupFromNode(id: string, type: string): string {
+  if (type === 'computer') {
+    if (id === 'None:0:0') return 'server-00';
+    if (id.startsWith('None:')) return 'servers';
+    return 'users';
+  }
+
+  if (type === 'user') {
+    return 'users';
+  }
+
+  return 'default';
+}
+
 
 export function parseJSONToGraph(json: any, inputJson?: any): GraphData {
   const nodes: NodeType[] = [];
@@ -76,19 +110,15 @@ export function parseJSONToGraph(json: any, inputJson?: any): GraphData {
     }
   }
 
-  // 🧠 Servisi i people group ID-ovi koji se spominju u input.json
   const referencedServices = new Set<string>();
-  const referencedPeopleGroups = new Set<string>();
-  for (const dc of inputJson?.data_collections || []) {
-    for (const srv of dc.services || []) {
-      referencedServices.add(srv.toLowerCase());
-    }
-    for (const grp of dc.supported_people_groups || []) {
-      referencedPeopleGroups.add(grp.toLowerCase());
+  if (inputJson?.data_collections) {
+    for (const dc of inputJson.data_collections) {
+      for (const srv of dc.services || []) {
+        referencedServices.add(srv.toLowerCase());
+      }
     }
   }
 
-  // 🎭 Kreiraj čvorove za sve uloge iz employee_groups
   const roles = new Set<string>();
   if (inputJson?.employee_groups) {
     for (const group of Object.values(inputJson.employee_groups) as any[]) {
@@ -107,26 +137,25 @@ export function parseJSONToGraph(json: any, inputJson?: any): GraphData {
         fullName: role,
         type: 'user',
         icon: '/icons/user.png',
-        group: 'users'
+        group: getGroupFromNode(roleId, 'user')
       };
       nodes.push(nodeIndex[roleId]);
     }
   }
 
   for (const [rawCompId, comp] of Object.entries(json.computers) as [string, any][]) {
-    const group = comp.network_idn || 'default';
-
+/*     const rawGroup = typeof comp.network_idn === 'string' ? comp.network_idn : 'default';
+    const group = rawGroup.replace(/[:]/g, ' / '); */
     let personId: string | undefined;
     let validSoftwareIds: string[] = [];
 
     if (comp.installed_software) {
       for (const [swId, sw] of Object.entries(comp.installed_software) as [string, any][]) {
-        const isUserMachine = sw.person_index === 0;
+        const isUserMachineSoftware = sw.person_index === 0;
         const isNetworkSoftware = sw.provides_network_services?.length > 0;
-
-        if (isUserMachine || isNetworkSoftware) {
+        if (isUserMachineSoftware || isNetworkSoftware) {
           validSoftwareIds.push(swId);
-          if (isUserMachine && !personId && sw.person_group_id) {
+          if (isUserMachineSoftware && !personId && sw.person_group_id) {
             personId = sw.person_group_id;
           }
         }
@@ -135,7 +164,6 @@ export function parseJSONToGraph(json: any, inputJson?: any): GraphData {
 
     const hasPerson = !!personId;
     const isServer = !hasPerson && comp.provides_network_services?.length > 0;
-
     const compId = isServer ? formatServerId(rawCompId) : rawCompId;
     const compLabel = compId.replace(/^None/, 'server').replace(/:/g, '.');
 
@@ -148,9 +176,9 @@ export function parseJSONToGraph(json: any, inputJson?: any): GraphData {
         fullName: compId,
         type: 'computer',
         icon: '/icons/computer.png',
-        group
+        group: getGroupFromNode(compId, 'computer')
       };
-      nodes.push(nodeIndex[compId]);
+      nodes.push(nodeIndex[compId]);;
     }
 
     if (hasPerson && personId) {
@@ -170,7 +198,7 @@ export function parseJSONToGraph(json: any, inputJson?: any): GraphData {
             fullName: personId,
             type: 'person',
             icon: '/icons/user.png',
-            group
+            group: getGroupFromNode(personId, 'person')
           };
           nodes.push(nodeIndex[personId]);
         }
@@ -185,18 +213,44 @@ export function parseJSONToGraph(json: any, inputJson?: any): GraphData {
 
     for (const swId of validSoftwareIds) {
       const sw = comp.installed_software[swId];
+      if (isUnwantedOperatingSystem(sw)) continue;
+
       const binaryLabel = getBinaryLabel(sw);
       const binaryFullName = sw.name || sw.idn || sw.cpe_idn || swId;
+      const binaryLabelLower = binaryLabel.toLowerCase();
 
-      if (!binaryLabel) continue;
+      if (!binaryLabel || binaryLabelLower === 'internet_connection') continue;
 
-      // ⚠️ FILTER: Ukloni softver koji je samo tehnička ovisnost i nije referenciran servisom
-      const isOnlyDependency = sw.idn && globalDependencyIds.has(sw.idn);
-      const isReferencedService = sw.provides_network_services?.some((srv: string) =>
-        referencedServices.has(srv.toLowerCase())
-      );
+      const providesValidService = (sw.provides_network_services || []).some((srv: string) => {
+        const norm = srv.trim().toLowerCase();
+        return norm.length > 0 && isNaN(Number(norm)) && !norm.includes('connection');
+      });
+      const isReferenced = referencedServices.has(binaryLabelLower);
 
-      if (isServer && isOnlyDependency && !isReferencedService) continue;
+
+/*       let shouldIncludeSoftwareNode = false;
+      if (binaryLabelLower.includes('.net framework')) { */
+        // Za .NET Framework, uključi samo ako pruža servis ili je eksplicitno referenciran
+/*         shouldIncludeSoftwareNode = providesValidService || isReferenced;
+      } else { */
+        // Za ostali softver, primijeni originalnu logiku:
+        // uključi ako je na korisničkom računalu, ILI pruža servis, ILI je referenciran
+/*         shouldIncludeSoftwareNode = hasPerson || providesValidService || isReferenced;
+      } */
+
+      const isDotNetFramework =
+        binaryLabel.toLowerCase().includes('.net framework') ||
+        binaryLabel.toLowerCase().includes('4.8');
+
+      let shouldIncludeSoftwareNode = false;
+      if (isDotNetFramework) {
+        shouldIncludeSoftwareNode = providesValidService || isReferenced;
+      } else {
+        shouldIncludeSoftwareNode = hasPerson || providesValidService || isReferenced;
+      }
+
+
+      if (!shouldIncludeSoftwareNode) continue;
 
       if (!nodeIndex[swId]) {
         nodeIndex[swId] = {
@@ -205,7 +259,7 @@ export function parseJSONToGraph(json: any, inputJson?: any): GraphData {
           fullName: binaryFullName,
           type: 'software',
           icon: '/icons/binary.png',
-          group
+          group: getGroupFromNode(swId, 'software')
         };
         nodes.push(nodeIndex[swId]);
       }
@@ -227,7 +281,7 @@ export function parseJSONToGraph(json: any, inputJson?: any): GraphData {
             fullName: customerLabel,
             type: 'user-service',
             icon: '/icons/customer.png',
-            group
+            group: getGroupFromNode(customerId, 'user-service')
           };
           nodes.push(nodeIndex[customerId]);
         }
@@ -249,7 +303,7 @@ export function parseJSONToGraph(json: any, inputJson?: any): GraphData {
             fullName: serviceName,
             type: 'service',
             icon: '/icons/service.png',
-            group
+            group: getGroupFromNode(serviceId, 'service')
           };
           nodes.push(nodeIndex[serviceId]);
         }
@@ -273,7 +327,7 @@ export function parseJSONToGraph(json: any, inputJson?: any): GraphData {
             fullName: `${serviceName}-${compId}`,
             type: 'service',
             icon: '/icons/service.png',
-            group
+            group: getGroupFromNode(serviceId, 'service')
           };
           nodes.push(nodeIndex[serviceId]);
         }
@@ -287,5 +341,38 @@ export function parseJSONToGraph(json: any, inputJson?: any): GraphData {
     }
   }
 
-  return { nodes, edges };
+  // --- POČETAK KODA ZA DINAMIČKO GRUPIRANJE ---
+  const uniqueGroups = [...new Set(nodes.map(node => node.group))];
+  const groupCount = uniqueGroups.length;
+  const groupCoordinates = new Map<string, { x: number; y: number }>();
+
+  // Povećavamo radijus ovisno o broju grupa da se ne preklapaju
+  const radius = 250 * groupCount;
+
+  uniqueGroups.forEach((group, index) => {
+    if (!group) return; // Preskoči ako grupa nije definirana
+    const angle = (index / groupCount) * 2 * Math.PI; // Raspored grupa u krug
+    groupCoordinates.set(group, {
+      x: radius * Math.cos(angle),
+      y: radius * Math.sin(angle)
+    });
+  });
+
+  const nodesWithCoordinates = nodes.map(node => {
+    const coords = node.group ? groupCoordinates.get(node.group) : undefined;
+    if (!coords) {
+      return node; // Vrati originalni čvor ako grupa nema koordinate
+    }
+
+    return {
+      ...node,
+      // Dodajemo koordinate s malim nasumičnim odmakom da se čvorovi ne stvore na istoj točki
+      x: coords.x + (Math.random() * 200 - 100),
+      y: coords.y + (Math.random() * 200 - 100)
+    };
+  });
+  // --- KRAJ KODA ZA DINAMIČKO GRUPIRANJE ---
+
+  // Vraćamo novu listu čvorova koja sadrži koordinate
+  return { nodes: nodesWithCoordinates, edges };
 }
