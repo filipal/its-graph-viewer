@@ -11,37 +11,58 @@ const App: React.FC = () => {
   const [selectedNode, setSelectedNode] = useState<NodeType | null>(null);
   const [viewMode, setViewMode] = useState<'landscape' | 'credentials' | 'dataservice' | 'firewalls'>('landscape');
   const [rawJson, setRawJson] = useState<any>(null); // Dodano za ponovno parsiranje
+  const [inputJson, setInputJson] = useState<any>(null);
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
 
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const content = event.target?.result;
-      if (typeof content === 'string') {
-        try {
-          const parsed = JSON.parse(content);
-          setRawJson(parsed); // Spremi originalni JSON
-          const graph = parseJSONToGraph(parsed, viewMode);
-          setGraphData(graph);
-        } catch (err) {
-          console.error('Neispravan JSON:', err);
+    let outputJson: any = null;
+    let inputJsonData: any = null;
+    let loaded = 0;
+
+    Array.from(files).forEach((file) => {
+      const reader = new FileReader();
+
+      reader.onload = (event) => {
+        const content = event.target?.result;
+        if (typeof content === 'string') {
+          try {
+            const parsed = JSON.parse(content);
+
+            if (file.name.toLowerCase().includes('input')) {
+              inputJsonData = parsed;
+              setInputJson(parsed);
+              console.log('✔️ Učitan input.json');
+            } else {
+              outputJson = parsed;
+              setRawJson(parsed);
+              console.log('✔️ Učitan output.json');
+            }
+          } catch (err) {
+            console.error(`❌ Greška kod parsiranja datoteke ${file.name}:`, err);
+          } finally {
+            loaded++;
+            if (loaded === files.length && outputJson) {
+              const graph = parseJSONToGraph(outputJson, inputJsonData);
+              setGraphData(graph);
+            }
+          }
         }
-      }
-    };
-    reader.readAsText(file);
+      };
+
+      reader.readAsText(file);
+    });
   };
 
   // Kad se promijeni viewMode, ponovno parsiraj isti JSON (ako postoji)
   React.useEffect(() => {
     if (rawJson) {
-      const graph = parseJSONToGraph(rawJson, viewMode);
+      const graph = parseJSONToGraph(rawJson, inputJson);
       setGraphData(graph);
       setSelectedNode(null);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [viewMode]);
+  }, [viewMode, rawJson, inputJson]);
 
   const handleExport = () => {
     const blob = new Blob([JSON.stringify(graphData, null, 2)], { type: 'application/json' });

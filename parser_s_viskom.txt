@@ -65,30 +65,20 @@ export function parseJSONToGraph(json: any, inputJson?: any): GraphData {
   const edges: EdgeType[] = [];
   const nodeIndex: Record<string, NodeType> = {};
 
-  const globalDependencyIds = new Set<string>();
+  const softwareUsedAsDependency = new Set<string>();
+
   for (const comp of Object.values(json.computers) as any[]) {
     if (comp.installed_software) {
       for (const sw of Object.values(comp.installed_software) as any[]) {
-        for (const depId of sw.local_dependencies || []) {
-          globalDependencyIds.add(depId);
+        const deps = sw.local_dependencies || [];
+        for (const depId of deps) {
+          softwareUsedAsDependency.add(depId);
         }
       }
     }
   }
 
-  // 🧠 Servisi i people group ID-ovi koji se spominju u input.json
-  const referencedServices = new Set<string>();
-  const referencedPeopleGroups = new Set<string>();
-  for (const dc of inputJson?.data_collections || []) {
-    for (const srv of dc.services || []) {
-      referencedServices.add(srv.toLowerCase());
-    }
-    for (const grp of dc.supported_people_groups || []) {
-      referencedPeopleGroups.add(grp.toLowerCase());
-    }
-  }
-
-  // 🎭 Kreiraj čvorove za sve uloge iz employee_groups
+  // 👥 Dinamički dohvatimo sve uloge iz input.json
   const roles = new Set<string>();
   if (inputJson?.employee_groups) {
     for (const group of Object.values(inputJson.employee_groups) as any[]) {
@@ -98,6 +88,7 @@ export function parseJSONToGraph(json: any, inputJson?: any): GraphData {
     }
   }
 
+  // 👤 Kreiraj čvorove za sve korisničke uloge (user.png)
   for (const role of roles) {
     const roleId = `user-${role}`;
     if (!nodeIndex[roleId]) {
@@ -116,6 +107,7 @@ export function parseJSONToGraph(json: any, inputJson?: any): GraphData {
   for (const [rawCompId, comp] of Object.entries(json.computers) as [string, any][]) {
     const group = comp.network_idn || 'default';
 
+    // 🧠 Izvuci person_id ako postoji
     let personId: string | undefined;
     let validSoftwareIds: string[] = [];
 
@@ -136,11 +128,17 @@ export function parseJSONToGraph(json: any, inputJson?: any): GraphData {
     const hasPerson = !!personId;
     const isServer = !hasPerson && comp.provides_network_services?.length > 0;
 
-    const compId = isServer ? formatServerId(rawCompId) : rawCompId;
+    // 🧩 Ispravi ID i label servera
+    const compId = isServer
+      ? formatServerId(rawCompId)
+      : rawCompId;
+
     const compLabel = compId.replace(/^None/, 'server').replace(/:/g, '.');
 
+    // Preskoči ako nema osoba ni softvera
     if (!hasPerson && validSoftwareIds.length === 0 && !isServer) continue;
 
+    // 💻 Computer/server čvor
     if (!nodeIndex[compId]) {
       nodeIndex[compId] = {
         id: compId,
@@ -153,8 +151,10 @@ export function parseJSONToGraph(json: any, inputJson?: any): GraphData {
       nodes.push(nodeIndex[compId]);
     }
 
+    // 👤 Povezivanje računala s korisnikom/ulogom
     if (hasPerson && personId) {
       const userNodeId = `user-${personId}`;
+
       if (nodeIndex[userNodeId]) {
         edges.push({
           id: `edge-${compId}-${userNodeId}`,
@@ -183,21 +183,25 @@ export function parseJSONToGraph(json: any, inputJson?: any): GraphData {
       }
     }
 
+    // 🔁 Software + service + customer čvorovi
     for (const swId of validSoftwareIds) {
       const sw = comp.installed_software[swId];
       const binaryLabel = getBinaryLabel(sw);
-      const binaryFullName = sw.name || sw.idn || sw.cpe_idn || swId;
+      const binaryFullName = sw.name || sw.idn || sw.cpe_idn || swId;      // --- FILTRIRAJ NEŽELJENE SOFTVERE NA SERVERIMA ---
 
       if (!binaryLabel) continue;
-
-      // ⚠️ FILTER: Ukloni softver koji je samo tehnička ovisnost i nije referenciran servisom
-      const isOnlyDependency = sw.idn && globalDependencyIds.has(sw.idn);
-      const isReferencedService = sw.provides_network_services?.some((srv: string) =>
-        referencedServices.has(srv.toLowerCase())
-      );
-
-      if (isServer && isOnlyDependency && !isReferencedService) continue;
-
+      // KORISTI sw.idn UMJESTO swId ZA OVISNOSTI!
+      if (
+        isServer &&
+        (
+          !sw.provides_network_services ||
+          sw.provides_network_services.length === 0 ||
+          softwareUsedAsDependency.has(sw.idn)
+        )
+      ) {
+        continue;
+      }
+      // ništa
       if (!nodeIndex[swId]) {
         nodeIndex[swId] = {
           id: swId,
@@ -217,6 +221,7 @@ export function parseJSONToGraph(json: any, inputJson?: any): GraphData {
         type: 'computer-software'
       });
 
+      // --- CUSTOMER čvorove dodaj samo za uređaje s korisnikom ---
       if (hasPerson) {
         const customerLabel = getCustomerLabel(binaryLabel);
         const customerId = `${customerLabel}-${swId}`;
@@ -239,30 +244,33 @@ export function parseJSONToGraph(json: any, inputJson?: any): GraphData {
           type: 'software-user-service'
         });
       }
+      // 🌐 SERVICE čvorovi (mrežni servisi)
+      if (sw.provides_network_services) {
+        for (const serviceName of sw.provides_network_services) {
+          const serviceId = `${serviceName}-${swId}`;
+          if (!nodeIndex[serviceId]) {
+            nodeIndex[serviceId] = {
+              id: serviceId,
+              label: serviceName,
+              fullName: serviceName,
+              type: 'service',
+              icon: '/icons/service.png',
+              group
+            };
+            nodes.push(nodeIndex[serviceId]);
+          }
 
-      for (const serviceName of sw.provides_network_services || []) {
-        const serviceId = `${serviceName}-${swId}`;
-        if (!nodeIndex[serviceId]) {
-          nodeIndex[serviceId] = {
-            id: serviceId,
-            label: serviceName,
-            fullName: serviceName,
-            type: 'service',
-            icon: '/icons/service.png',
-            group
-          };
-          nodes.push(nodeIndex[serviceId]);
+          edges.push({
+            id: `edge-${swId}-${serviceId}`,
+            source: swId,
+            target: serviceId,
+            type: 'software-service'
+          });
         }
-
-        edges.push({
-          id: `edge-${swId}-${serviceId}`,
-          source: swId,
-          target: serviceId,
-          type: 'software-service'
-        });
       }
     }
 
+    // Ako je server bez softvera, ali ima provides_network_services
     if (isServer && (!comp.installed_software || validSoftwareIds.length === 0)) {
       for (const serviceName of comp.provides_network_services || []) {
         const serviceId = `${serviceName}-${compId}`;

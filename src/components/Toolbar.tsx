@@ -17,7 +17,7 @@ const Toolbar: React.FC<ToolbarProps> = ({
 }) => {
   return (
     <div className="toolbar" style={{ display: 'flex', flexDirection: 'column', gap: '10px', padding: '10px' }}>
-      <input type="file" accept="application/json" onChange={onLoadFile} />
+      <input type="file" accept="application/json" multiple onChange={onLoadFile} />
       
       <label>
         Odaberi prikaz:

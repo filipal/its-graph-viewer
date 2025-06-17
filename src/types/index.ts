@@ -5,6 +5,7 @@ export type NodeType = {
   group?: string;
   icon?: string;
   count?: number;
+  fullName?: string;
 };
 
 export type EdgeType = {
