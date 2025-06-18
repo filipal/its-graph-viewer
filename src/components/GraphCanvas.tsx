@@ -1,117 +1,79 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { GraphCanvas } from 'reagraph';
-import type { GraphData, NodeType, EdgeType } from '../types';
+// filepath: src/components/GraphCanvas.tsx
+import React, { useMemo } from 'react';
+import ReactFlow, { Controls, Background, BackgroundVariant, type Node, type Edge } from 'reactflow';
+import type { GraphData, NodeType as MyNodeType } from '../types';
+import { getLayoutedElements } from '../services/layout';
+import CustomNode from './CustomNode';
 
-function getGroupColor(group: string | undefined): string {
-  const colorMap: Record<string, string> = {
-    'server-00': '#B3E5FC',
-    'servers': '#C8E6C9',
-    'users': '#FFF9C4',
-    'default': '#E0E0E0'
-  };
-  return group && colorMap[group] ? colorMap[group] : colorMap['default'];
-}
-
-const iconMap: Record<string, string> = {
-  user: '/icons/user.png',
-  'user-service': '/icons/customer.png',
-  lock: '/icons/lock.png',
-  key: '/icons/key.png',
-  computer: '/icons/computer.png',
-  binary: '/icons/binary.png',
-  database: '/icons/database.png',
-  internet: '/icons/internet.png',
-  service: '/icons/service.png',
-  software: '/icons/binary.png',
-  customer: '/icons/customer.png'
+// Registriramo naš custom node da ga React Flow može koristiti
+const nodeTypes = {
+  custom: CustomNode,
 };
 
 interface GraphCanvasComponentProps {
   data: GraphData;
-  onNodeClick?: (node: NodeType) => void;
+  onNodeClick?: (node: MyNodeType) => void;
 }
 
 const GraphCanvasComponent: React.FC<GraphCanvasComponentProps> = ({ data, onNodeClick }) => {
-  const ref = useRef<any>(null);
-  const [hoveredNodeName, setHoveredNodeName] = useState<string | null>(null);
-  useEffect(() => {
-    if (ref.current?.zoomToFit) {
-      ref.current.zoomToFit();
+  const { nodes, edges } = useMemo(() => {
+    if (!data || data.nodes.length === 0) {
+      return { nodes: [], edges: [] };
     }
+
+    const initialNodes: Node[] = data.nodes.map((node) => ({
+      id: node.id,
+      type: 'custom', // Kažemo React Flow da koristi naš custom node
+      position: { x: 0, y: 0 }, // Poziciju će izračunati Dagre
+      data: { label: node.label, originalNode: node },
+    }));
+
+    const initialEdges: Edge[] = data.edges.map((edge) => {
+      const sourcePrefix = edge.source.split('-')[0];
+      const targetPrefix = edge.target.split('-')[0];
+      
+      const isDashed = (sourcePrefix === 'user' || sourcePrefix === 'person' || targetPrefix === 'user' || targetPrefix === 'person') &&
+                       (sourcePrefix === 'computer' || targetPrefix === 'computer');
+      
+      return {
+        id: edge.id,
+        source: edge.source,
+        target: edge.target,
+        style: {
+          strokeDasharray: isDashed ? '5 5' : undefined,
+          stroke: '#888',
+          strokeWidth: 2,
+        },
+      };
+    });
+
+    // Vraćamo elemente s izračunatim pozicijama
+    return getLayoutedElements(initialNodes, initialEdges);
+
   }, [data]);
 
+  const handleNodeClick = (_event: React.MouseEvent, node: Node) => {
+    if (onNodeClick && node.data.originalNode) {
+      onNodeClick(node.data.originalNode);
+    }
+  };
+
   return (
-    <div>
-      <GraphCanvas
-        ref={ref}
-        nodes={data.nodes}
-        edges={data.edges}
-        // Uklonili smo `groupBy` jer sada kontroliramo layout i stilove direktno
-        layoutType="forceDirected2d"
-        layoutOverrides={{
-          // POJAČANE SILE ZA BOLJE GRUPIRANJE
-          forces: {
-            charge: -2000,       // Jača sila odbijanja među čvorovima
-            linkDistance: 20, // Veća ciljana udaljenost veza
-            linkStrength: 0.1,  // Malo slabije veze da grupe ostanu odvojene
-            collide: 1.5,        // Sprječava preklapanje čvorova
-            gravity: 0.05       // Slabija centralna gravitacija
-          }
-        }}
-        nodeStyle={(node: NodeType) => ({
-          // KORIŠTENJE VAŠE FUNKCIJE ZA BOJE
-          fill: getGroupColor(node.group),
-          icon: {
-            url: node.icon || iconMap[node.type?.toLowerCase?.()] || '/icons/computer.png',
-            size: 48
-          },
-          label: {
-            color: '#2A2C34', // Tamnija boja za bolju čitljivost
-            fontSize: 16,
-            fontWeight: 'bold'
-          },
-          borderRadius: 12,
-          padding: 6,
-          cursor: 'pointer'
-        })}
-        edgeStyle={(_edge: EdgeType, source: NodeType, target: NodeType) => {
-          // SADA ĆE SE OVAJ ISPIS POJAVITI U KONZOLI!
-          console.log(`PROVJERA VEZE: source.type='${source.type}', target.type='${target.type}'`);
-
-          const nodeTypes = new Set([source.type, target.type]);
-
-          const isDashed =
-            (nodeTypes.has('user') || nodeTypes.has('person')) &&
-            nodeTypes.has('computer');
-
-          const isComputerToSoftware =
-            source.type === 'computer' && target.type === 'software';
-
-          return {
-            stroke: isComputerToSoftware ? 'red' : 'black',
-            strokeDasharray: isDashed ? '4 2' : '0',
-            strokeWidth: isComputerToSoftware ? 3 : 1.5
-          };
-        }}
-        onNodeClick={(node: NodeType) => {
-          const found = data.nodes.find((n) => n.id === node.id);
-          if (found && onNodeClick) {
-            onNodeClick(found);
-          }
-        }}
-        onNodePointerEnter={(node: NodeType) => {
-          setHoveredNodeName(node.fullName || node.label);
-        }}
-        onNodePointerLeave={() => setHoveredNodeName(null)}
-      />
-
-      {hoveredNodeName && (
-        <div style={{ marginTop: '1rem', padding: '0.5rem 1rem', borderTop: '1px solid #ccc' }}>
-          <h4>Node name: {hoveredNodeName}</h4>
-        </div>
-      )}
+    <div style={{ height: '100%', width: '100%' }}>
+      <ReactFlow
+        nodes={nodes}
+        edges={edges}
+        nodeTypes={nodeTypes}
+        onNodeClick={handleNodeClick}
+        fitView
+        nodesDraggable={true}
+      >
+        <Controls />
+        {/* 2. MIJENJAMO "dots" U BackgroundVariant.Dots */}
+        <Background variant={BackgroundVariant.Dots} gap={12} size={1} />
+      </ReactFlow>
     </div>
   );
 };
 
-export default GraphCanvasComponent;
+export default React.memo(GraphCanvasComponent);

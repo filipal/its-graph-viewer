@@ -1,3 +1,5 @@
+import 'reactflow/dist/style.css'; // <-- DODAJTE OVU LINIJU
+
 import React, { useState, useEffect } from 'react';
 import GraphCanvasComponent from './components/GraphCanvas';
 import Toolbar from './components/Toolbar';
