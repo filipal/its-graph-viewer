@@ -1,0 +1,157 @@
+import React, { useEffect, useRef, useState } from 'react';
+import { GraphCanvas } from 'reagraph';
+import type { GraphData, NodeType, EdgeType } from '../types';
+import forceAtlas2 from 'graphology-layout-forceatlas2';
+import Graph from 'graphology';
+
+function applyForceAtlasLayout(data: GraphData): GraphData {
+  const graph = new Graph();
+
+  // Dodavanje čvorova
+  data.nodes.forEach((node) => {
+    graph.addNode(node.id, { ...node });
+  });
+
+  // Dodavanje bridova
+  data.edges.forEach((edge) => {
+    graph.addEdge(edge.source, edge.target);
+  });
+
+  // Pokreni layout (ForceAtlas2)
+  forceAtlas2.assign(graph, {
+    iterations: 100,
+    settings: {
+      gravity: 1,
+      scalingRatio: 10,
+      slowDown: 1
+    }
+  });
+
+  // Mapiraj natrag pozicije u nodes
+  const nodesWithPosition = data.nodes.map((node) => {
+    const { x, y } = graph.getNodeAttributes(node.id);
+    return { ...node, x, y, z: 0 };
+  });
+
+  return {
+    nodes: nodesWithPosition,
+    edges: data.edges
+  };
+}
+
+
+function getGroupColor(group: string | undefined): string {
+  const colorMap: Record<string, string> = {
+    'server-00': '#B3E5FC',
+    'servers': '#C8E6C9',
+    'users': '#FFF9C4',
+    'default': '#E0E0E0'
+  };
+  return group && colorMap[group] ? colorMap[group] : colorMap['default'];
+}
+
+const iconMap: Record<string, string> = {
+  user: '/icons/user.png',
+  'user-service': '/icons/customer.png',
+  lock: '/icons/lock.png',
+  key: '/icons/key.png',
+  computer: '/icons/computer.png',
+  binary: '/icons/binary.png',
+  database: '/icons/database.png',
+  internet: '/icons/internet.png',
+  service: '/icons/service.png',
+  software: '/icons/binary.png',
+  customer: '/icons/customer.png'
+};
+
+interface GraphCanvasComponentProps {
+  data: GraphData;
+  onNodeClick?: (node: NodeType) => void;
+}
+
+const GraphCanvasComponent: React.FC<GraphCanvasComponentProps> = ({ data, onNodeClick }) => {
+  const ref = useRef<any>(null);
+  const [hoveredNodeName, setHoveredNodeName] = useState<string | null>(null);
+  const [layoutedData, setLayoutedData] = useState<GraphData>(data);
+
+  useEffect(() => {
+    const withLayout = applyForceAtlasLayout(data);
+    setLayoutedData(withLayout);
+
+    setTimeout(() => {
+      ref.current?.zoomToFit?.();
+    }, 200); // malo kašnjenje da se primijeni layout prije centriranja
+  }, [data]);
+
+  return (
+    <div
+      onContextMenu={(e) => {
+        e.preventDefault();
+        console.log('Right click at', e.clientX, e.clientY);
+      }}
+      style={{ width: '100%', height: '100%', position: 'relative' }}
+    >
+      <GraphCanvas
+        ref={ref}
+        nodes={layoutedData.nodes}
+        edges={layoutedData.edges}
+        layoutType="forceDirected2d"
+        layoutOverrides={{
+          forces: {
+            charge: -2000,
+            linkDistance: 20,
+            linkStrength: 0.1,
+            collide: 1.5,
+            gravity: 0.05
+          }
+        }}
+        nodeStyle={(node: NodeType) => ({
+          fill: getGroupColor(node.group),
+          icon: {
+            url: node.icon || iconMap[node.type?.toLowerCase?.()] || '/icons/computer.png',
+            size: 48
+          },
+          label: {
+            color: '#2A2C34',
+            fontSize: 16,
+            fontWeight: 'bold'
+          },
+          borderRadius: 12,
+          padding: 6,
+          cursor: 'pointer'
+        })}
+        edgeStyle={(_edge: EdgeType, source: NodeType, target: NodeType) => {
+          console.log(`PROVJERA VEZE: source.type='${source.type}', target.type='${target.type}'`);
+          const nodeTypes = new Set([source.type, target.type]);
+          const isDashed =
+            (nodeTypes.has('user') || nodeTypes.has('person')) &&
+            nodeTypes.has('computer');
+          const isComputerToSoftware =
+            source.type === 'computer' && target.type === 'software';
+          return {
+            stroke: isComputerToSoftware ? 'red' : 'black',
+            strokeDasharray: isDashed ? '4 2' : '0',
+            strokeWidth: isComputerToSoftware ? 3 : 1.5
+          };
+        }}
+        onNodeClick={(node: NodeType) => {
+          const found = layoutedData.nodes.find((n) => n.id === node.id);
+          if (found && onNodeClick) {
+            onNodeClick(found);
+          }
+        }}
+        onNodePointerEnter={(node: NodeType) => {
+          setHoveredNodeName(node.fullName || node.label);
+        }}
+        onNodePointerLeave={() => setHoveredNodeName(null)}
+      />
+      {hoveredNodeName && (
+        <div style={{ marginTop: '1rem', padding: '0.5rem 1rem', borderTop: '1px solid #ccc' }}>
+          <h4>Node name: {hoveredNodeName}</h4>
+        </div>
+      )}
+</div>
+  );
+};
+
+export default GraphCanvasComponent;

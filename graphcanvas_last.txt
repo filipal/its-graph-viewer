@@ -75,10 +75,11 @@ const GraphCanvasComponent: React.FC<GraphCanvasComponentProps> = ({ data, onNod
           cursor: 'pointer'
         })}
         edgeStyle={(_edge: EdgeType, source: NodeType, target: NodeType) => {
-          // Provjeravamo tipove samih čvorova na krajevima veze.
+          // SADA ĆE SE OVAJ ISPIS POJAVITI U KONZOLI!
+          console.log(`PROVJERA VEZE: source.type='${source.type}', target.type='${target.type}'`);
+
           const nodeTypes = new Set([source.type, target.type]);
 
-          // Linija je isprekidana ako spaja 'user'/'person' i 'computer'.
           const isDashed =
             (nodeTypes.has('user') || nodeTypes.has('person')) &&
             nodeTypes.has('computer');
