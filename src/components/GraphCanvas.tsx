@@ -1,83 +1,15 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { GraphCanvas } from 'reagraph';
 import type { GraphData, NodeType, EdgeType } from '../types';
-import forceAtlas2 from 'graphology-layout-forceatlas2';
-import Graph from 'graphology';
-
-function applyForceAtlasLayout(data: GraphData): GraphData {
-  const graph = new Graph();
-  data.nodes.forEach((node) => graph.addNode(node.id, { ...node }));
-  data.edges.forEach((edge) => graph.addEdge(edge.source, edge.target));
-
-  forceAtlas2.assign(graph, {
-    iterations: 100,
-    settings: {
-      gravity: 1,
-      scalingRatio: 10,
-      slowDown: 1
-    }
-  });
-
-  const nodesWithPosition = data.nodes.map((node) => {
-    const { x, y } = graph.getNodeAttributes(node.id);
-    return { ...node, x, y, z: 0 };
-  });
-
-  return {
-    nodes: nodesWithPosition,
-    edges: data.edges
-  };
-}
-
-function shiftConnectedNodes(graphData: GraphData, nodeId: string, shiftX = 300, shiftY = 0): GraphData {
-  const graph = new Graph();
-
-  // Napravi graf
-  graphData.nodes.forEach((node) => graph.addNode(node.id));
-  graphData.edges.forEach((edge) => graph.addEdge(edge.source, edge.target));
-
-  // Pronađi samo direktne susjede + taj jedan čvor
-  const group = new Set<string>();
-  group.add(nodeId);
-  graph.forEachNeighbor(nodeId, (neighbor) => group.add(neighbor));
-
-  // Pomakni samo označene
-  const updatedNodes = graphData.nodes.map((node) =>
-    group.has(node.id)
-      ? { ...node, x: (node.x || 0) + shiftX, y: (node.y || 0) + shiftY }
-      : node
-  );
-
-  return {
-    nodes: updatedNodes,
-    edges: graphData.edges
-  };
-}
-
-
-function getGroupColor(group: string | undefined): string {
-  const colorMap: Record<string, string> = {
-    'server-00': '#B3E5FC',
-    'servers': '#C8E6C9',
-    'users': '#FFF9C4',
-    'default': '#E0E0E0'
-  };
-  return group && colorMap[group] ? colorMap[group] : colorMap['default'];
-}
-
-const iconMap: Record<string, string> = {
-  user: '/icons/user.png',
-  'user-service': '/icons/customer.png',
-  lock: '/icons/lock.png',
-  key: '/icons/key.png',
-  computer: '/icons/computer.png',
-  binary: '/icons/binary.png',
-  database: '/icons/database.png',
-  internet: '/icons/internet.png',
-  service: '/icons/service.png',
-  software: '/icons/binary.png',
-  customer: '/icons/customer.png'
-};
+import type { GraphDataWithResolvedEdges } from '../utils/graphUtils';
+import {
+  applyForceAtlasLayout,
+  resolveEdgeNodes,
+  shiftConnectedNodes,
+  getGroupColor,
+  iconMap,
+  simplifyGraph
+} from '../utils/graphUtils';
 
 interface GraphCanvasComponentProps {
   data: GraphData;
@@ -86,36 +18,34 @@ interface GraphCanvasComponentProps {
 
 const GraphCanvasComponent: React.FC<GraphCanvasComponentProps> = ({ data, onNodeClick }) => {
   const ref = useRef<any>(null);
-  const [layoutedData, setLayoutedData] = useState<GraphData>(() => applyForceAtlasLayout(data));
+  const [layoutedData, setLayoutedData] = useState<GraphDataWithResolvedEdges>(() => {
+    const rawLayouted = applyForceAtlasLayout(data);
+    return resolveEdgeNodes({ nodes: rawLayouted.nodes, edges: rawLayouted.edges.map(e => ({ ...e, source: e.source.id, target: e.target.id })) });
+  });
   const [hoveredNode, setHoveredNode] = useState<NodeType | null>(null);
   const [selectedComputerId, setSelectedComputerId] = useState<string | null>(null);
-  // Dodatne state varijable za filtere
   const [availableGroups, setAvailableGroups] = useState<string[]>([]);
   const [selectedGroup, setSelectedGroup] = useState<string>('');
   const [availableTypes, setAvailableTypes] = useState<string[]>([]);
   const [selectedTypes, setSelectedTypes] = useState<Set<string>>(new Set());
 
   useEffect(() => {
-    const groups = Array.from(
-      new Set(data.nodes.map((n) => n.group).filter((g): g is string => !!g && g !== 'default'))
-    );
+    const groups = Array.from(new Set(data.nodes.map(n => n.group).filter((g): g is string => !!g && g !== 'default')));
     setAvailableGroups(groups);
 
-    const types = Array.from(new Set(data.nodes.map((n) => n.type).filter((t): t is string => !!t)));
+    const types = Array.from(new Set(data.nodes.map(n => n.type).filter((t): t is string => !!t)));
     setAvailableTypes(types);
 
-    const layouted = applyForceAtlasLayout(data); // spremi rezultat
-    console.log('Broj bridova (edges):', layouted.edges.length);
-
-    setLayoutedData(layouted);
-
-    /* setLayoutedData(applyForceAtlasLayout(data)); */
+    const layouted = applyForceAtlasLayout(data);
+    const resolved = resolveEdgeNodes({ nodes: layouted.nodes, edges: layouted.edges.map(e => ({ ...e, source: e.source.id, target: e.target.id })) });
+    setLayoutedData(resolved);
     setTimeout(() => ref.current?.zoomToFit?.(), 200);
   }, [data]);
 
   const filterGraph = () => {
     let filteredNodes = data.nodes;
 
+    // 1. Ako je odabrana grupa
     if (selectedGroup) {
       const groupNodeIds = new Set(
         data.nodes.filter((n) => n.group === selectedGroup).map((n) => n.id)
@@ -140,15 +70,118 @@ const GraphCanvasComponent: React.FC<GraphCanvasComponentProps> = ({ data, onNod
       filteredNodes = data.nodes.filter((n) => relatedNodeIds.has(n.id));
     }
 
+    // 2. Ako su odabrani tipovi – filtriraj po tipu
     if (selectedTypes.size > 0) {
       filteredNodes = filteredNodes.filter((n) => selectedTypes.has(n.type));
     }
 
+    // 3. ID-jevi trenutnih čvorova
     const filteredIds = new Set(filteredNodes.map((n) => n.id));
-    const filteredEdges = data.edges.filter((e) => filteredIds.has(e.source) && filteredIds.has(e.target));
+    const filteredEdges = data.edges.filter(
+      (e) => filteredIds.has(e.source) && filteredIds.has(e.target)
+    );
 
-    setLayoutedData({ nodes: filteredNodes, edges: filteredEdges });
+    // 4. Dodaj virtualne veze ako treba
+    const extraEdges: EdgeType[] = [];
+    /* const allNodes = new Map(data.nodes.map((n) => [n.id, n])); */
+
+    // user → software ako je computer isključen
+    if (selectedTypes.has('user') && selectedTypes.has('software') && !selectedTypes.has('computer')) {
+      filteredNodes.forEach((user) => {
+        if (user.type !== 'user') return;
+        const computerId = user.id.replace('user-', '');
+
+        filteredNodes.forEach((soft) => {
+          if (soft.type === 'software' && soft.id.startsWith(computerId)) {
+            extraEdges.push({
+              id: `virtual-${user.id}-${soft.id}`,
+              source: user.id,
+              target: soft.id,
+              type: 'user-software-virtual'
+            });
+          }
+        });
+      });
+    }
+
+    // software → service i software → user-service
+    if (selectedTypes.has('software')) {
+      filteredNodes.forEach((soft) => {
+        if (soft.type !== 'software') return;
+        filteredNodes.forEach((other) => {
+          if ((other.type === 'service' || other.type === 'user-service') &&
+            other.id.includes(soft.id)) {
+            extraEdges.push({
+              id: `virtual-${soft.id}-${other.id}`,
+              source: soft.id,
+              target: other.id,
+              type: 'software-sub-virtual'
+            });
+          }
+        });
+      });
+    }
+
+    // user → service/user-service (transitivno) ako je software selektiran
+    if (selectedTypes.has('user') && selectedTypes.has('software') && (selectedTypes.has('service') || selectedTypes.has('user-service'))) {
+      filteredNodes.forEach((user) => {
+        if (user.type !== 'user') return;
+        const computerId = user.id.replace('user-', '');
+
+        filteredNodes.forEach((soft) => {
+          if (soft.type === 'software' && soft.id.startsWith(computerId)) {
+            filteredNodes.forEach((other) => {
+              if ((other.type === 'service' || other.type === 'user-service') && other.id.includes(soft.id)) {
+                extraEdges.push({
+                  id: `virtual-${user.id}-${other.id}`,
+                  source: user.id,
+                  target: other.id,
+                  type: 'user-to-leaf-virtual'
+                });
+              }
+            });
+          }
+        });
+      });
+    }
+
+    const allEdges = [...filteredEdges, ...extraEdges];
+
+    // 5. Ako nema rezultata – resetiraj prikaz
+    if (filteredNodes.length === 0) {
+      console.warn('Nema čvorova za prikaz – resetiram prikaz.');
+      const layouted = applyForceAtlasLayout(data);
+      const resolved = resolveEdgeNodes({
+        nodes: layouted.nodes,
+        edges: layouted.edges.map(e => ({
+          ...e,
+          source: e.source.id,
+          target: e.target.id,
+        })),
+      });
+      setLayoutedData(resolved);
+      return;
+    }
+
+    // 6. Inače – layout filtriranih podataka
+    const layouted = applyForceAtlasLayout({ nodes: filteredNodes, edges: allEdges });
+    const resolved = resolveEdgeNodes({
+      nodes: layouted.nodes,
+      edges: layouted.edges.map(e => ({
+        ...e,
+        source: e.source.id,
+        target: e.target.id,
+      })),
+    });
+    setLayoutedData(resolved);
   };
+
+
+
+
+  useEffect(() => {
+    filterGraph();
+  }, [selectedGroup, selectedTypes]);
 
   const toggleType = (type: string) => {
     const newSet = new Set(selectedTypes);
@@ -156,18 +189,7 @@ const GraphCanvasComponent: React.FC<GraphCanvasComponentProps> = ({ data, onNod
     setSelectedTypes(newSet);
   };
 
-  useEffect(() => {
-    filterGraph();
-  }, [selectedGroup, selectedTypes]);
-
-
-
-
-/*   const handleRightClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    console.log('Right click at', e.clientX, e.clientY);
-    // Mjesto za context menu u editoru kasnije
-  }; */
+  console.log('Rendering GraphCanvas:', layoutedData.nodes.length, 'nodes,', layoutedData.edges.length, 'edges');
 
   return (
     <div style={{ width: '100%', height: '100%', position: 'relative' }}>
@@ -190,7 +212,11 @@ const GraphCanvasComponent: React.FC<GraphCanvasComponentProps> = ({ data, onNod
       <GraphCanvas
         ref={ref}
         nodes={layoutedData.nodes}
-        edges={layoutedData.edges}
+        edges={layoutedData.edges.map(e => ({
+          ...e,
+          source: e.source.id,
+          target: e.target.id
+        }))}
         draggable
         layoutType="forceDirected2d"
         edgeArrowPosition="none"
@@ -204,7 +230,6 @@ const GraphCanvasComponent: React.FC<GraphCanvasComponentProps> = ({ data, onNod
           borderRadius: 12, padding: 6, cursor: 'pointer'
         })}
         edgeStyle={(_edge: EdgeType, source: NodeType, target: NodeType) => {
-          console.log('SOURCE:', source.type, 'TARGET:', target.type);
           let stroke = 'black';
           let strokeDasharray = '0';
 
@@ -218,12 +243,8 @@ const GraphCanvasComponent: React.FC<GraphCanvasComponentProps> = ({ data, onNod
           } else if (source.type === 'lock' || target.type === 'lock') {
             stroke = 'blue';
           }
-          
-          return {
-            stroke,
-            strokeDasharray,
-            strokeWidth: 2
-          };
+
+          return { stroke, strokeDasharray, strokeWidth: 2 };
         }}
         onNodeClick={(node: NodeType) => {
           if (node.type === 'computer') setSelectedComputerId(node.id);
@@ -236,14 +257,26 @@ const GraphCanvasComponent: React.FC<GraphCanvasComponentProps> = ({ data, onNod
       {selectedComputerId && (
         <div style={{ position: 'absolute', top: 10, right: 10, background: 'white', padding: '0.5rem', borderRadius: '8px', boxShadow: '0 0 6px rgba(0,0,0,0.2)', zIndex: 1000 }}>
           <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '0.3rem' }}>
-            <button onClick={() => setLayoutedData(shiftConnectedNodes(layoutedData, selectedComputerId, 0, -100))}>↑</button>
+            <button onClick={() => {
+              const updated = shiftConnectedNodes(simplifyGraph(layoutedData), selectedComputerId, 0, -100);
+              setLayoutedData(resolveEdgeNodes(updated));
+            }}>↑</button>
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-            <button onClick={() => setLayoutedData(shiftConnectedNodes(layoutedData, selectedComputerId, -100, 0))}>←</button>
-            <button onClick={() => setLayoutedData(shiftConnectedNodes(layoutedData, selectedComputerId, 500, 0))}>→</button>
+            <button onClick={() => {
+              const updated = shiftConnectedNodes(simplifyGraph(layoutedData), selectedComputerId, -100, 0);
+              setLayoutedData(resolveEdgeNodes(updated));
+            }}>←</button>
+            <button onClick={() => {
+              const updated = shiftConnectedNodes(simplifyGraph(layoutedData), selectedComputerId, 500, 0);
+              setLayoutedData(resolveEdgeNodes(updated));
+            }}>→</button>
           </div>
           <div style={{ display: 'flex', justifyContent: 'center', marginTop: '0.3rem' }}>
-            <button onClick={() => setLayoutedData(shiftConnectedNodes(layoutedData, selectedComputerId, 0, 100))}>↓</button>
+            <button onClick={() => {
+              const updated = shiftConnectedNodes(simplifyGraph(layoutedData), selectedComputerId, 0, 100);
+              setLayoutedData(resolveEdgeNodes(updated));
+            }}>↓</button>
           </div>
         </div>
       )}
@@ -261,4 +294,3 @@ const GraphCanvasComponent: React.FC<GraphCanvasComponentProps> = ({ data, onNod
 };
 
 export default GraphCanvasComponent;
-
