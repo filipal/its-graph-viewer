@@ -1,7 +1,13 @@
-import React, { useEffect, useRef, useState } from 'react';
+// Glavna React komponenta za prikaz grafa koristeći Reagraph vizualizaciju.
+// Omogućuje filtriranje čvorova po grupi i tipu, dinamičko generiranje virtualnih veza,
+// te interakciju (hover, klik) nad čvorovima i pomicanje susjednih čvorova.
+import React, { useEffect, useRef, useState, useMemo } from 'react';
 import { GraphCanvas } from 'reagraph';
 import type { GraphData, NodeType, EdgeType } from '../types';
+import { getEdgeStyle, getEdgeLabel } from '../utils/edgeStyleUtils';
 import type { GraphDataWithResolvedEdges } from '../utils/graphUtils';
+import { isResolvedEdge } from '../utils/graphUtils';
+import { prepareGraph } from '../utils/prepareGraph';
 import {
   applyForceAtlasLayout,
   resolveEdgeNodes,
@@ -11,51 +17,78 @@ import {
   simplifyGraph
 } from '../utils/graphUtils';
 
+// Definicija očekivanih props-a: ulazni graf i callback za klik na čvor
 interface GraphCanvasComponentProps {
-  data: GraphData;
+  data: GraphData; // osnovni skup čvorova i veza
   onNodeClick?: (node: NodeType) => void;
 }
 
+// Mapiranje logičkih grupa na pripadajuće tipove čvorova (koristi se za filtriranje)
+const groupTypeMap: Record<string, string[]> = {
+  users: ['user', 'computer', 'software', 'user-service'],
+  servers: ['computer', 'software', 'service'],
+  'server-00': ['computer', 'software', 'service'],
+  // dodaj ostale grupe po potrebi
+};
+
 const GraphCanvasComponent: React.FC<GraphCanvasComponentProps> = ({ data, onNodeClick }) => {
+  console.log('GraphCanvasComponent render');
   const ref = useRef<any>(null);
+  // Priprema grafa (npr. dodavanje virtualnih veza) memoizirana kako bi se izbjegla nepotrebna rekalkulacija
+  const preparedData = useMemo(() => prepareGraph(data), [data]);
+  // Inicijalno generiranje layouta pomoću ForceAtlas2 algoritma i rješavanje ID referenci u rubovima
   const [layoutedData, setLayoutedData] = useState<GraphDataWithResolvedEdges>(() => {
-    const rawLayouted = applyForceAtlasLayout(data);
-    return resolveEdgeNodes({ nodes: rawLayouted.nodes, edges: rawLayouted.edges.map(e => ({ ...e, source: e.source.id, target: e.target.id })) });
+    const rawLayouted = applyForceAtlasLayout(preparedData);
+    return rawLayouted;
   });
   const [hoveredNode, setHoveredNode] = useState<NodeType | null>(null);
   const [selectedComputerId, setSelectedComputerId] = useState<string | null>(null);
+  // Dropdown filtriranje po grupi
   const [availableGroups, setAvailableGroups] = useState<string[]>([]);
   const [selectedGroup, setSelectedGroup] = useState<string>('');
+  // Checkbox filtriranje po tipu
   const [availableTypes, setAvailableTypes] = useState<string[]>([]);
   const [selectedTypes, setSelectedTypes] = useState<Set<string>>(new Set());
 
   useEffect(() => {
-    const groups = Array.from(new Set(data.nodes.map(n => n.group).filter((g): g is string => !!g && g !== 'default')));
+    const preparedData = prepareGraph(data); // generira dodatne (virtualne) rubove
+    // Izvlači sve postojeće grupe čvorova osim 'default'
+    const groups = Array.from(new Set(preparedData.nodes.map(n => n.group).filter((g): g is string => !!g && g !== 'default')));
     setAvailableGroups(groups);
 
-    const types = Array.from(new Set(data.nodes.map(n => n.type).filter((t): t is string => !!t)));
-    setAvailableTypes(types);
+    let relevantNodes = preparedData.nodes;
 
-    const layouted = applyForceAtlasLayout(data);
-    const resolved = resolveEdgeNodes({ nodes: layouted.nodes, edges: layouted.edges.map(e => ({ ...e, source: e.source.id, target: e.target.id })) });
-    setLayoutedData(resolved);
+    if (selectedGroup) {
+      relevantNodes = preparedData.nodes.filter(n => n.group === selectedGroup);
+    }
+
+    const types = Array.from(
+      new Set(relevantNodes.map(n => n.type).filter((t): t is string => !!t))
+    );
+    setAvailableTypes(types);
+     // Rekalkulacija layouta i veza
+    const layouted = applyForceAtlasLayout(preparedData);
+    setLayoutedData(layouted);
     setTimeout(() => ref.current?.zoomToFit?.(), 200);
   }, [data]);
-
+  // Filtrira čvorove na temelju grupe i tipa te po potrebi dodaje virtualne rubove između njih.
+  // Osigurava da se svi povezani čvorovi u kontekstu odabrane grupe uključe u prikaz.
   const filterGraph = () => {
-    let filteredNodes = data.nodes;
+    let filteredNodes = preparedData.nodes;
 
-    // 1. Ako je odabrana grupa
+    // 1. Filtriraj po grupi
     if (selectedGroup) {
       const groupNodeIds = new Set(
-        data.nodes.filter((n) => n.group === selectedGroup).map((n) => n.id)
+        preparedData.nodes
+          .filter((n: NodeType) => n.group === selectedGroup)
+          .map((n) => n.id)
       );
       const relatedNodeIds = new Set<string>(groupNodeIds);
 
       let added = true;
       while (added) {
         added = false;
-        data.edges.forEach((edge) => {
+        preparedData.edges.forEach((edge: EdgeType) => {
           if (relatedNodeIds.has(edge.source) && !relatedNodeIds.has(edge.target)) {
             relatedNodeIds.add(edge.target);
             added = true;
@@ -67,130 +100,254 @@ const GraphCanvasComponent: React.FC<GraphCanvasComponentProps> = ({ data, onNod
         });
       }
 
-      filteredNodes = data.nodes.filter((n) => relatedNodeIds.has(n.id));
+      filteredNodes = preparedData.nodes.filter((n: NodeType) => relatedNodeIds.has(n.id));
     }
 
-    // 2. Ako su odabrani tipovi – filtriraj po tipu
+    // 2. Filtriraj po tipovima
     if (selectedTypes.size > 0) {
-      filteredNodes = filteredNodes.filter((n) => selectedTypes.has(n.type));
+      filteredNodes = filteredNodes.filter((n: NodeType) =>
+          selectedTypes.has(n.type)
+      );
     }
-
-    // 3. ID-jevi trenutnih čvorova
-    const filteredIds = new Set(filteredNodes.map((n) => n.id));
-    const filteredEdges = data.edges.filter(
-      (e) => filteredIds.has(e.source) && filteredIds.has(e.target)
+    
+    // 3. Filtriraj rubove koji povezuju samo aktivne čvorove
+    const filteredIds = new Set(filteredNodes.map((n: NodeType) => n.id));
+    const filteredEdges = preparedData.edges.filter(
+      (e: EdgeType) => filteredIds.has(e.source) && filteredIds.has(e.target)
     );
 
-    // 4. Dodaj virtualne veze ako treba
     const extraEdges: EdgeType[] = [];
-    /* const allNodes = new Map(data.nodes.map((n) => [n.id, n])); */
+    const addedEdgeIds = new Set<string>();
 
-    // user → software ako je computer isključen
-    if (selectedTypes.has('user') && selectedTypes.has('software') && !selectedTypes.has('computer')) {
+    // Dodaj user → software (ako nema computer)
+    if (
+      selectedTypes.has('user') &&
+      selectedTypes.has('software') &&
+      !selectedTypes.has('computer')
+    ) {
       filteredNodes.forEach((user) => {
         if (user.type !== 'user') return;
-        const computerId = user.id.replace('user-', '');
-
+        const userIdShort = user.id.replace(/^user-/, '');
         filteredNodes.forEach((soft) => {
-          if (soft.type === 'software' && soft.id.startsWith(computerId)) {
-            extraEdges.push({
-              id: `virtual-${user.id}-${soft.id}`,
-              source: user.id,
-              target: soft.id,
-              type: 'user-software-virtual'
-            });
+          if (soft.type === 'software' && soft.id.startsWith(userIdShort)) {
+            const id = `virtual-${user.id}-${soft.id}`;
+            const alreadyExists = preparedData.edges.some(
+              (e) => e.source === user.id && e.target === soft.id
+            );
+            if (!alreadyExists && !addedEdgeIds.has(id)) {
+              extraEdges.push({
+                id,
+                source: user.id,
+                target: soft.id,
+                type: 'user-software-virtual',
+              });
+              addedEdgeIds.add(id);
+            }
           }
         });
       });
     }
 
-    // software → service i software → user-service
+    // Dodaj software → service
     if (selectedTypes.has('software')) {
       filteredNodes.forEach((soft) => {
         if (soft.type !== 'software') return;
-        filteredNodes.forEach((other) => {
-          if ((other.type === 'service' || other.type === 'user-service') &&
-            other.id.includes(soft.id)) {
-            extraEdges.push({
-              id: `virtual-${soft.id}-${other.id}`,
-              source: soft.id,
-              target: other.id,
-              type: 'software-sub-virtual'
-            });
+        filteredNodes.forEach((s) => {
+          if (
+            (s.type === 'service' || s.type === 'user-service') &&
+            s.id.includes(soft.id)
+          ) {
+            const id = `virtual-${soft.id}-${s.id}`;
+            const alreadyExists = preparedData.edges.some(
+              (e) => e.source === soft.id && e.target === s.id
+            );
+            if (!alreadyExists && !addedEdgeIds.has(id)) {
+              extraEdges.push({ id, source: soft.id, target: s.id, type: 'software-sub-virtual' });
+              addedEdgeIds.add(id);
+            }
           }
         });
       });
     }
 
-    // user → service/user-service (transitivno) ako je software selektiran
-    if (selectedTypes.has('user') && selectedTypes.has('software') && (selectedTypes.has('service') || selectedTypes.has('user-service'))) {
-      filteredNodes.forEach((user) => {
+    // Dodaj user → user-service SAMO ako nema ni softvera ni računala
+    if (
+      selectedTypes.has('user') &&
+      selectedTypes.has('user-service') &&
+      !selectedTypes.has('software') &&
+      !selectedTypes.has('computer')
+    ) {
+      filteredNodes.forEach(user => {
         if (user.type !== 'user') return;
-        const computerId = user.id.replace('user-', '');
+        const userIdShort = user.id.replace(/^user-/, '');
 
-        filteredNodes.forEach((soft) => {
-          if (soft.type === 'software' && soft.id.startsWith(computerId)) {
-            filteredNodes.forEach((other) => {
-              if ((other.type === 'service' || other.type === 'user-service') && other.id.includes(soft.id)) {
-                extraEdges.push({
-                  id: `virtual-${user.id}-${other.id}`,
-                  source: user.id,
-                  target: other.id,
-                  type: 'user-to-leaf-virtual'
-                });
-              }
-            });
+        filteredNodes.forEach(us => {
+          if (
+            us.type === 'user-service' &&
+            us.id.split('>')[0].includes(userIdShort)
+          ) {
+            const id = `virtual-${user.id}-${us.id}`;
+            const alreadyExists = preparedData.edges.some(
+              e => e.source === user.id && e.target === us.id
+            );
+            if (!alreadyExists && !addedEdgeIds.has(id)) {
+              extraEdges.push({
+                id,
+                source: user.id,
+                target: us.id,
+                type: 'user-user-service-virtual',
+              });
+              addedEdgeIds.add(id);
+            }
           }
         });
+      });
+    }
+
+    // Dodaj computer → user-service SAMO ako nema softvera
+    if (
+      selectedTypes.has('computer') &&
+      selectedTypes.has('user-service') &&
+      !selectedTypes.has('software')
+    ) {
+      filteredNodes.forEach(comp => {
+        if (comp.type !== 'computer') return;
+
+        filteredNodes.forEach(us => {
+          if (us.type !== 'user-service') return;
+
+          const parts = us.id.split('>')[0].split('-');
+          const usComputerId = parts[parts.length - 1];
+          if (usComputerId !== comp.id) return;
+
+          const id = `virtual-${comp.id}-${us.id}`;
+          const alreadyExists = preparedData.edges.some(
+            e => e.source === comp.id && e.target === us.id
+          );
+          if (!alreadyExists && !addedEdgeIds.has(id)) {
+            extraEdges.push({
+              id,
+              source: comp.id,
+              target: us.id,
+              type: 'computer-user-service-virtual',
+            });
+            addedEdgeIds.add(id);
+          }
+        });
+      });
+    }
+
+    // Dodaj service → software ILI → computer (ali ne oboje)
+    if (selectedTypes.has('service')) {
+      const hasSoftware = selectedTypes.has('software');
+      const hasComputer = selectedTypes.has('computer');
+
+      filteredNodes.forEach((svc) => {
+        if (svc.type !== 'service') return;
+
+        let linked = false;
+
+        // 1. Pokušaj povezati sa softverom (ako postoji)
+        if (hasSoftware) {
+          for (const soft of filteredNodes) {
+            if (soft.type !== 'software') continue;
+            if (svc.id.includes(soft.id)) {
+              const id = `virtual-${soft.id}-${svc.id}`;
+              const alreadyExists = preparedData.edges.some(
+                (e) => e.source === soft.id && e.target === svc.id
+              );
+              if (!alreadyExists && !addedEdgeIds.has(id)) {
+                extraEdges.push({
+                  id,
+                  source: soft.id,
+                  target: svc.id,
+                  type: 'software-sub-virtual',
+                });
+                addedEdgeIds.add(id);
+              }
+              linked = true;
+              break; // poveži samo s prvim odgovarajućim softverom
+            }
+          }
+        }
+
+        // 2. Ako nije spojen sa softverom, pokušaj s računalom
+        if (!linked && hasComputer) {
+          for (const comp of filteredNodes) {
+            if (comp.type !== 'computer') continue;
+            if (svc.id.includes(comp.id)) {
+              const id = `virtual-${comp.id}-${svc.id}`;
+              const alreadyExists = preparedData.edges.some(
+                (e) => e.source === comp.id && e.target === svc.id
+              );
+              if (!alreadyExists && !addedEdgeIds.has(id)) {
+                extraEdges.push({
+                  id,
+                  source: comp.id,
+                  target: svc.id,
+                  type: 'computer-service-virtual',
+                });
+                addedEdgeIds.add(id);
+              }
+              break;
+            }
+          }
+        }
       });
     }
 
     const allEdges = [...filteredEdges, ...extraEdges];
 
-    // 5. Ako nema rezultata – resetiraj prikaz
     if (filteredNodes.length === 0) {
-      console.warn('Nema čvorova za prikaz – resetiram prikaz.');
-      const layouted = applyForceAtlasLayout(data);
-      const resolved = resolveEdgeNodes({
-        nodes: layouted.nodes,
-        edges: layouted.edges.map(e => ({
-          ...e,
-          source: e.source.id,
-          target: e.target.id,
-        })),
-      });
-      setLayoutedData(resolved);
+      const layouted = applyForceAtlasLayout(preparedData);
+
+      setLayoutedData(layouted);
       return;
     }
 
-    // 6. Inače – layout filtriranih podataka
     const layouted = applyForceAtlasLayout({ nodes: filteredNodes, edges: allEdges });
-    const resolved = resolveEdgeNodes({
-      nodes: layouted.nodes,
-      edges: layouted.edges.map(e => ({
-        ...e,
-        source: e.source.id,
-        target: e.target.id,
-      })),
-    });
-    setLayoutedData(resolved);
+    setLayoutedData(layouted);
   };
 
-
-
-
+  // Automatski refiltrira graf kad se promijeni selekcija grupe ili tipova
   useEffect(() => {
     filterGraph();
   }, [selectedGroup, selectedTypes]);
-
+  // Omogućuje selekciju/deselekciju tipova čvorova (checkbox funkcionalnost)
   const toggleType = (type: string) => {
     const newSet = new Set(selectedTypes);
     newSet.has(type) ? newSet.delete(type) : newSet.add(type);
     setSelectedTypes(newSet);
   };
 
-  console.log('Rendering GraphCanvas:', layoutedData.nodes.length, 'nodes,', layoutedData.edges.length, 'edges');
+  // Ako korisnik promijeni grupu, ponovno izračunaj dostupne tipove i očisti nevažeće selekcije
+  useEffect(() => {
+    let types: string[] = [];
 
+    if (selectedGroup && groupTypeMap[selectedGroup]) {
+      types = groupTypeMap[selectedGroup];
+    } else {
+      // ako nije odabrana grupa, prikazujemo sve moguće tipove u podacima
+      types = Array.from(
+        new Set(preparedData.nodes.map(n => n.type).filter((t): t is string => !!t))
+      );
+    }
+
+    setAvailableTypes(types);
+
+    // Resetiraj odabrane tipove ako više nisu dostupni
+    setSelectedTypes((prev) => {
+      const valid = new Set<string>();
+      for (const t of prev) {
+        if (types.includes(t)) valid.add(t);
+      }
+      return valid;
+    });
+  }, [selectedGroup, preparedData]);
+
+  console.log('Šaljem edgeStyle:', getEdgeStyle);
+  // Glavni render: uključuje filtere (grupa/tipovi), interaktivnu vizualizaciju grafa,
+  // te informacije o hoveranim čvorovima i kontrole za pomicanje susjeda odabranog računala.
   return (
     <div style={{ width: '100%', height: '100%', position: 'relative' }}>
       <div style={{ position: 'absolute', top: 10, left: 10, zIndex: 1000, background: '#fff', padding: '0.5rem', borderRadius: 8 }}>
@@ -212,14 +369,23 @@ const GraphCanvasComponent: React.FC<GraphCanvasComponentProps> = ({ data, onNod
       <GraphCanvas
         ref={ref}
         nodes={layoutedData.nodes}
-        edges={layoutedData.edges.map(e => ({
+        // 1. Reagraph traži string ID-eve za prikaz grafa
+        edges={layoutedData.edges.map((e) => ({
           ...e,
-          source: e.source.id,
-          target: e.target.id
+          source: typeof e.source === 'string' ? e.source : e.source.id,
+          target: typeof e.target === 'string' ? e.target : e.target.id
         }))}
         draggable
         layoutType="forceDirected2d"
         edgeArrowPosition="none"
+        // 2. Za stilove koristi originalne edge objekte koji imaju source/target kao objekte
+        edgeStyle={(edge: EdgeType) => getEdgeStyle(edge, layoutedData.nodes)}
+
+        edgeLabel={(edge: EdgeType) => {
+          const resolvedEdge = layoutedData.edges.find(e => e.id === edge.id);
+          if (!isResolvedEdge(resolvedEdge)) return '';
+          return getEdgeLabel(resolvedEdge);
+        }}
         nodeStyle={(node: NodeType) => ({
           fill: getGroupColor(node.group),
           icon: {
@@ -229,23 +395,6 @@ const GraphCanvasComponent: React.FC<GraphCanvasComponentProps> = ({ data, onNod
           label: { color: '#2A2C34', fontSize: 16, fontWeight: 'bold' },
           borderRadius: 12, padding: 6, cursor: 'pointer'
         })}
-        edgeStyle={(_edge: EdgeType, source: NodeType, target: NodeType) => {
-          let stroke = 'black';
-          let strokeDasharray = '0';
-
-          if ((source.type === 'user' && target.type === 'computer') || (source.type === 'computer' && target.type === 'user')) {
-            stroke = 'black';
-            strokeDasharray = '4 2';
-          } else if (source.type === 'computer' && target.type === 'software') {
-            stroke = 'red';
-          } else if (source.group === target.group) {
-            stroke = 'green';
-          } else if (source.type === 'lock' || target.type === 'lock') {
-            stroke = 'blue';
-          }
-
-          return { stroke, strokeDasharray, strokeWidth: 2 };
-        }}
         onNodeClick={(node: NodeType) => {
           if (node.type === 'computer') setSelectedComputerId(node.id);
           if (onNodeClick) onNodeClick(node);
